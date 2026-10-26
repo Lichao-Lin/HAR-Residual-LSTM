@@ -4,6 +4,111 @@
 
 使用 HAR 基线与 LSTM 残差修正进行波动率预测。
 
+## 模型公式
+
+以下公式对应当前代码。记 $t$ 为交易日观测索引，$r_t$ 为 IXIC 收益率，预测跨度 $H=5$，数值下限 $\varepsilon=10^{-12}$。
+
+### 1. 预测目标与 HAR 特征
+
+未来五日方差代理及其对数为：
+
+$$
+V_t^{+}=\sum_{k=1}^{H}r_{t+k}^{2},
+\qquad y_t=\log\!\left(\max(V_t^{+},\varepsilon)\right).
+$$
+
+该目标由日收益率平方和构造。预测时可用的历史状态为：
+
+$$
+v_t=\log\!\left(\max\!\left(\sum_{k=0}^{H-1}r_{t-k}^{2},\varepsilon\right)\right),
+\qquad
+\mathbf z_t=\begin{bmatrix}
+v_t \\
+\frac{1}{5}\sum_{j=0}^{4}v_{t-j} \\
+\frac{1}{22}\sum_{j=0}^{21}v_{t-j}
+\end{bmatrix}.
+$$
+
+代码中的 `har_d`、`har_w`、`har_m` 分别对应这三个分量：当前五日对数方差，以及它的 5 日、22 日移动平均。这里先取对数，再计算移动平均。
+
+### 2. HAR 基线与残差
+
+在训练集 $\mathcal T$ 上以普通最小二乘拟合 HAR：
+
+$$
+(\hat\beta_0,\hat{\boldsymbol\beta})
+=\underset{\beta_0,\boldsymbol\beta}{\arg\min}
+\sum_{t\in\mathcal T}\left(y_t-\beta_0-\boldsymbol\beta^{\top}\mathbf z_t\right)^2,
+\qquad
+\hat y_t^{\mathrm{HAR}}=\hat\beta_0+\hat{\boldsymbol\beta}^{\top}\mathbf z_t.
+$$
+
+固定 HAR 参数后，LSTM 的学习目标为残差：
+
+$$
+e_t=y_t-\hat y_t^{\mathrm{HAR}}.
+$$
+
+训练残差来自训练集上拟合的 HAR，验证和测试残差使用同一组 HAR 参数；代码没有对训练残差做交叉拟合。
+
+### 3. LSTM 残差修正
+
+令 $\mathbf x_t$ 为多资产输入，$L$ 为序列长度。用波浪号表示按训练集统计量标准化后的变量，则网络可概括为：
+
+$$
+\mathbf h_t=\operatorname{LSTM}_{\theta}
+\!\left(\tilde{\mathbf x}_{t-L+1},\ldots,\tilde{\mathbf x}_{t}\right)_{\mathrm{last}},
+\qquad
+\hat{\tilde e}_t=g_{\theta}\!\left(\operatorname{LayerNorm}(\mathbf h_t),\mathbf u_t\right),
+\qquad
+\hat e_t=\mu_e+s_e\hat{\tilde e}_t.
+$$
+
+$\mu_e$、$s_e$ 是训练残差的均值和用于标准化的尺度。$\mathbf u_t$ 表示可选的标准化 HAR 输入。网络在训练集上学习标准化残差，验证集用于早停。两套脚本的默认残差模型有以下区别：
+
+| 设置 | `run_experiments.py` | `run_outline_complete.py` |
+| --- | --- | --- |
+| 序列长度 $L$ | 60 | 96 |
+| 每日输入 $\mathbf x_t$ | 多资产收益率及其绝对值 | 多资产收益率 |
+| 输出层额外输入 $\mathbf u_t$ | 标准化 HAR 特征 | 无 |
+| 输出头 $g_\theta$ | 含 GELU、Dropout 的多层感知机 | 线性层 |
+| 训练损失 | Smooth L1，作用于标准化残差 | 均方误差，作用于标准化残差 |
+
+输入和目标的标准化参数均只从训练集估计；VIX 不进入输入。
+
+### 4. 验证集调权与最终预测
+
+在验证集 $\mathcal V$ 上选择残差修正权重：
+
+$$
+\alpha^{\ast}=\underset{\alpha\in\mathcal A}{\arg\min}
+\frac{1}{|\mathcal V|}\sum_{t\in\mathcal V}
+\left(y_t-\hat y_t^{\mathrm{HAR}}-\alpha\hat e_t\right)^2,
+\qquad
+\mathcal A=\{0,0.01,\ldots,1.25\}.
+$$
+
+最终对数方差预测为：
+
+$$
+\hat y_t=\hat y_t^{\mathrm{HAR}}+\alpha^{\ast}\hat e_t.
+$$
+
+权重选定后固定用于测试集。扩展实验还对五个随机种子各自调权后的对数预测取平均，用于集成预测与配对比较。
+
+### 5. 评估尺度
+
+MSE、MAE 和 $R^2$ 在对数方差尺度计算。代码在计算 QLIKE 时将预测转换回方差尺度，并做数值截断：
+
+$$
+\hat V_t=\exp\!\left(\operatorname{clip}(\hat y_t,-30,10)\right),
+\qquad
+\operatorname{QLIKE}=\frac{1}{|\mathcal S|}\sum_{t\in\mathcal S}
+\left(\frac{\exp(y_t)}{\hat V_t}+\log\hat V_t\right),
+$$
+
+其中 $\mathcal S$ 为测试集。训练、验证、测试之间的四日间隔规则见下文“样本划分”。
+
 ## 目录
 
 | 路径 | 内容 |
