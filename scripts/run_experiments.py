@@ -8,8 +8,6 @@ import time
 from pathlib import Path
 
 import lightgbm as lgb
-import matplotlib as mpl
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
@@ -23,12 +21,13 @@ from sklearn.preprocessing import StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from temporal_split import SPLIT_GAP, split_indices
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'data'
 OUT = ROOT / "outputs"
 ART = OUT / "artifacts"
-FIG = OUT / "figures"
-for p in (OUT, ART, FIG):
+for p in (OUT, ART):
     p.mkdir(parents=True, exist_ok=True)
 
 SEED = 2026
@@ -80,11 +79,6 @@ def make_data():
     y = meta["y"].to_numpy(np.float32)
     true_var = meta["future_var"].to_numpy(np.float64)
     return d, assets, meta, Xseq, Xhar, y, true_var
-
-
-def split_indices(n):
-    a, b = int(n * .70), int(n * .85)
-    return np.arange(a), np.arange(a, b), np.arange(b, n)
 
 
 def metrics(y, pred):
@@ -311,43 +305,15 @@ def main():
         pvals.append({"Asset": a, "F_stat": f, "p_value": p, "neglog10p": -np.log10(max(p, 1e-300))})
     pd.DataFrame(pvals).sort_values("p_value").to_csv(ART / "incremental_f_tests.csv", index=False)
 
-    make_figures(perf, pd.DataFrame(abl), predout, impdf, regime, pd.DataFrame(pvals), shap_feature)
     env = {"python": os.sys.version, "torch": torch.__version__, "device": str(DEVICE), "cuda": torch.cuda.is_available(),
            "n_observations": len(y), "assets": assets, "horizon": HORIZON, "lookback": LOOKBACK,
+           "split_gap_observations": SPLIT_GAP,
            "residual_shrinkage_alpha": alpha, "runtime_seconds": time.time() - started}
     (ART / "run_metadata.json").write_text(json.dumps(env, ensure_ascii=False, indent=2), encoding="utf-8")
     print(perf.to_string())
     print("\nDM\n", pd.DataFrame(dm).to_string(index=False))
     print("\nRegime\n", regime.to_string())
     print(json.dumps(env, ensure_ascii=False, indent=2))
-
-
-def make_figures(perf, abl, predout, imp, regime, pvals, shap_feature):
-    mpl.rcParams.update({"font.family": "sans-serif", "font.sans-serif": ["Microsoft YaHei", "DejaVu Sans"], "font.size": 8,
-                         "axes.spines.top": False, "axes.spines.right": False, "pdf.fonttype": 42, "svg.fonttype": "none"})
-    colors = {"HAR-RV": "#777777", "HAR + Residual LSTM": "#2673B8", "LightGBM": "#E69F00", "Direct LSTM": "#7B6BA8"}
-    # Fig 1: lead-lag evidence.
-    q = pvals.sort_values("p_value").copy()
-    fig, ax = plt.subplots(figsize=(7.1, 3.5)); ax.bar(q.Asset, q.neglog10p, color=np.where(q.p_value < .05, "#2673B8", "#BDBDBD")); ax.axhline(-np.log10(.05), ls="--", c="#B33A3A", lw=1); ax.set_ylabel(r"$-\log_{10}(p)$"); ax.set_xlabel("跨资产变量"); ax.tick_params(axis="x", rotation=45); ax.set_title("跨资产绝对收益对未来IXIC波动的增量预测检验"); fig.tight_layout(); savefig(fig, "figure1_incremental_tests")
-    # Fig 3: prediction and model comparison.
-    fig, axs = plt.subplots(1, 2, figsize=(7.1, 3.1), gridspec_kw={"width_ratios": [1.2, 1]})
-    z = predout.iloc[-250:]; axs[0].plot(z.Date, z.y_true_logvar, c="#222222", lw=1, label="真实值")
-    for m in ("HAR-RV", "HAR + Residual LSTM"): axs[0].plot(z.Date, z[m], c=colors[m], lw=1, label=m)
-    axs[0].set_ylabel("未来5日对数实现方差"); axs[0].legend(fontsize=7); axs[0].set_title("a  样本外预测轨迹", loc="left", fontweight="bold")
-    pp = perf.sort_values("R2_log"); axs[1].barh(pp.index, pp.R2_log, color=[colors.get(x, "#A9B8C6") for x in pp.index]); axs[1].axvline(0, c="#444", lw=.6); axs[1].set_xlabel(r"样本外 $R^2$"); axs[1].set_title("b  主模型比较", loc="left", fontweight="bold"); fig.tight_layout(); savefig(fig, "figure3_prediction_performance")
-    # Fig 4 importance.
-    fig, axs = plt.subplots(1, 2, figsize=(7.1, 4.2)); qi = imp.sort_values("Permutation_MSE_increase"); axs[0].barh(qi.Asset, qi.Permutation_MSE_increase, xerr=qi.SD, color="#2673B8", alpha=.85); axs[0].set_xlabel("置换后MSE增量"); axs[0].set_title("a  Residual LSTM置换重要性", loc="left", fontweight="bold")
-    qs = shap_feature.head(15).sort_values("mean_abs_shap"); axs[1].barh(qs.feature, qs.mean_abs_shap, color="#E69F00", alpha=.85); axs[1].set_xlabel("平均|SHAP值|"); axs[1].set_title("b  LightGBM SHAP重要性", loc="left", fontweight="bold"); fig.tight_layout(); savefig(fig, "figure4_feature_importance")
-    # Fig 5 regime and ablation.
-    fig, axs = plt.subplots(1, 2, figsize=(7.1, 3.2)); rr = regime.reindex([x for x in ("低波动", "中波动", "高波动") if x in regime.index]); x=np.arange(len(rr)); w=.35
-    axs[0].bar(x-w/2, rr.HAR_MSE, w, label="HAR-RV", color="#999999"); axs[0].bar(x+w/2, rr.Proposed_MSE, w, label="本文方法", color="#2673B8"); axs[0].set_xticks(x, rr.index); axs[0].set_ylabel("对数方差MSE"); axs[0].legend(); axs[0].set_title("a  市场状态稳健性", loc="left", fontweight="bold")
-    aa=abl.sort_values("R2_log"); axs[1].barh(aa.Configuration, aa.R2_log, color=np.where(aa.Configuration=="完整模型", "#2673B8", "#B8C2CC")); axs[1].set_xlabel(r"样本外 $R^2$"); axs[1].set_title("b  消融与敏感性", loc="left", fontweight="bold"); fig.tight_layout(); savefig(fig, "figure5_regime_ablation")
-
-
-def savefig(fig, name):
-    for ext, kw in (("png", {"dpi": 300}), ("pdf", {}), ("svg", {}), ("tiff", {"dpi": 600})):
-        fig.savefig(FIG / f"{name}.{ext}", bbox_inches="tight", **kw)
-    plt.close(fig)
 
 
 if __name__ == "__main__":
