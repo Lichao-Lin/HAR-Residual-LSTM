@@ -15,8 +15,10 @@ import statsmodels.api as sm
 from statsmodels.tsa.api import VAR
 from scipy import stats
 
+from temporal_split import SPLIT_GAP, split_indices
+
 ROOT=Path(__file__).resolve().parents[1]; DATA = ROOT / 'data'
-OUT=ROOT/'outputs'; ART=OUT/'artifacts_complete'; ART.mkdir(parents=True, exist_ok=True); FIG=OUT/'figures_complete'; FIG.mkdir(parents=True, exist_ok=True)
+OUT=ROOT/'outputs'; ART=OUT/'artifacts_complete'; ART.mkdir(parents=True, exist_ok=True)
 DEVICE=torch.device('cuda' if torch.cuda.is_available() else 'cpu'); torch.set_num_threads(min(8,os.cpu_count() or 1))
 ASSET_EXCLUDE={'Date','VIX'}; H=5; MAX_T=252; DEFAULT_T=96
 
@@ -35,7 +37,7 @@ def build():
         if not meta.loc[t,['y','har_d','har_w','har_m']].isna().any():
             ix.append(t); seq.append(r.iloc[t-MAX_T+1:t+1].to_numpy(np.float32))
     meta=meta.loc[ix].reset_index(drop=True); X=np.asarray(seq); Hx=meta[['har_d','har_w','har_m']].to_numpy(np.float32); y=meta.y.to_numpy(np.float32)
-    n=len(y); a=int(.70*n); b=int(.85*n); tr=np.arange(a); va=np.arange(a,b); te=np.arange(b,n)
+    tr,va,te=split_indices(len(y))
     return raw,assets,meta,X,Hx,y,tr,va,te
 
 def metric(y,p):
@@ -101,6 +103,9 @@ def eng(X,Hx,assets,T=96):
 def main():
     t0=time.time(); raw,assets,meta,X,Hx,y,tr,va,te=build(); har=LinearRegression().fit(Hx[tr],y[tr]); hp=har.predict(Hx); residual=y-hp
     seeds=[42,123,2024,3187,9254]; predictions={'HAR-RV':[hp[te]]*len(seeds)}; param_rows=[]
+    pd.DataFrame({'split':['train','validation','test'], 'n':[len(tr),len(va),len(te)],
+                  'start':[meta.Date.iloc[ii[0]] for ii in (tr,va,te)],
+                  'end':[meta.Date.iloc[ii[-1]] for ii in (tr,va,te)]}).to_csv(ART/'split_summary.csv',index=False)
     # Common classical baselines.
     xe,names=eng(X,Hx,assets,DEFAULT_T)
     ridge=Ridge(10).fit(xe[tr],y[tr]); rf=RandomForestRegressor(n_estimators=500,min_samples_leaf=5,max_features=.6,n_jobs=-1,random_state=42).fit(xe[tr],y[tr])
@@ -170,7 +175,7 @@ def main():
     yr=[]
     for year,z in mm.groupby(mm.Date.dt.year): yr.append({'year':year,'n':len(z),'HAR_MSE':mean_squared_error(z.truth,z.HAR),'Proposed_MSE':mean_squared_error(z.truth,z.Proposed),'Delta_R2':r2_score(z.truth,z.Proposed)-r2_score(z.truth,z.HAR)})
     pd.DataFrame(yr).to_csv(ART/'yearly_robustness.csv',index=False)
-    metaout={'device':str(DEVICE),'assets':assets,'VIX_used':False,'max_history':MAX_T,'default_history':DEFAULT_T,'n':len(y),'train_n':len(tr),'val_n':len(va),'test_n':len(te),'runtime_s':time.time()-t0}
+    metaout={'device':str(DEVICE),'assets':assets,'VIX_used':False,'max_history':MAX_T,'default_history':DEFAULT_T,'n':len(y),'train_n':len(tr),'val_n':len(va),'test_n':len(te),'split_gap_observations':SPLIT_GAP,'runtime_s':time.time()-t0}
     (ART/'metadata_complete.json').write_text(json.dumps(metaout,ensure_ascii=False,indent=2),encoding='utf-8'); print(summary); print(pd.DataFrame(dmrows)); print(pd.DataFrame(ab)); print(metaout)
 
 if __name__=='__main__': main()
