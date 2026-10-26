@@ -1,0 +1,8 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.sha256 text eol=lf
+# Preserve the exact bytes covered by MANIFEST.sha256.
+*.csv -text
+*.json -text
+*.csv whitespace=cr-at-eol
