@@ -3,6 +3,7 @@
 本项目基于已有研究开展模型实现与扩展，用于个人研究与方法展示。代码将持续迭代，部分设计与实验设置可能与原研究有所不同。
 
 使用 HAR 基线与 LSTM 残差修正进行波动率预测。
+关联论文Cross-Asset Volatility Forecasting with HAR-Guided LSTM Residual Learning
 
 ## 目录
 
