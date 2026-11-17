@@ -1,0 +1,43 @@
+name: Docker
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build CPU image
+        run: |
+          docker build --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --tag har-residual-lstm:ci .
+      - name: Run split tests and quick LSTM training
+        run: |
+          docker run --rm har-residual-lstm:ci python -m unittest discover -s tests -v
+          mkdir -p "$RUNNER_TEMP/har-results"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --mount "type=bind,source=$RUNNER_TEMP/har-results,target=/app/outputs" \
+            har-residual-lstm:ci python scripts/har_lstm_cli.py --device cpu --quick --threads 2
+          test -s "$RUNNER_TEMP"/har-results/cli/quick_*/metrics.csv
+          test -s "$RUNNER_TEMP"/har-results/cli/quick_*/predictions.csv
+
+      - name: Publish verified image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker tag har-residual-lstm:ci "$image:$GITHUB_SHA"
+          docker tag har-residual-lstm:ci "$image:latest"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$image:$GITHUB_SHA"
+          docker push "$image:latest"
