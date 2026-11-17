@@ -16,10 +16,106 @@
 | `data/` | 输入价格与收益率 CSV |
 | `requirements.txt` | 原实验环境的依赖版本 |
 | `MANIFEST.sha256` | 输入数据的 SHA-256 校验值 |
+| `Dockerfile` | CPU 实验镜像的构建入口 |
+| `.github/workflows/docker.yml` | 构建、验证并发布 Docker 镜像 |
 
 ## Docker 部署
 
-使用 CPU 镜像运行两套实验，或在 GitHub Actions 构建通过后从 GHCR 拉取镜像。参见 [Docker 运行指南](DOCKER.md)。
+容器以**批处理**方式运行：启动后读取 CSV、训练模型并写出评估结果，任务完成后自动退出。镜像内含 Python 3.11、CPU 版 PyTorch 和仓库自带数据，不需要在宿主机安装 Python，也不需要 GPU。
+
+### 1. 准备 Docker
+
+Windows 和 macOS 启动 Docker Desktop，Windows 需使用 Linux 容器。Linux 启动 Docker Engine。运行 `docker version`，确认同时看到 Client 和 Server 信息。下面使用命名数据卷的单行命令可以在 Bash 和 PowerShell 中执行。
+
+### 2. 获取镜像
+
+任选一种方式，两种方式最后都使用本地镜像名 `har-residual-lstm:latest`。
+
+**从源码构建。** 克隆仓库并切到含有 `Dockerfile` 的版本，在仓库根目录执行：
+
+```bash
+git clone https://github.com/Lichao-Lin/HAR-Residual-LSTM.git
+cd HAR-Residual-LSTM
+docker build -t har-residual-lstm:latest .
+```
+
+默认分支包含 Docker 配置时，可直接按上面执行。如果要试用尚未合并的部署 PR，请先切到它的分支再执行 `docker build`。如果已经克隆，可以在现有仓库中切换分支并构建。构建时会下载依赖，并按 `MANIFEST.sha256` 校验镜像内的 `prices.csv` 和 `returns.csv`。
+
+**从 GitHub Container Registry 拉取。** `main` 上的 Docker 工作流构建并验证通过后，将镜像发布到 GHCR，并添加 `latest` 和完整提交 SHA 两个标签。可用的预构建镜像由 Linux x86-64 CI 生成。
+
+```bash
+docker pull ghcr.io/lichao-lin/har-residual-lstm:latest
+docker tag ghcr.io/lichao-lin/har-residual-lstm:latest har-residual-lstm:latest
+```
+
+复现实验时可把两条命令中的远程 `latest` 换成对应的完整提交 SHA 标签。若尚无发布记录，使用源码构建；若提示无权拉取，请确认自己有软件包的读取权限，并登录 GHCR。
+
+### 3. 短训练和完整实验
+
+先跑一次短训练，检查镜像、输入和输出是否可用。短训练只用于验证流程：
+
+```bash
+docker run --rm -v har-lstm-quick:/app/outputs har-residual-lstm:latest python scripts/har_lstm_cli.py --device cpu --quick
+```
+
+确认正常后，选择完整实验：
+
+```bash
+# 60 日窗口实验：使用镜像默认命令
+docker run --rm -v har-lstm-60d:/app/outputs har-residual-lstm:latest
+
+# 96 日窗口的扩展实验：使用五个随机种子，运行时间较长
+docker run --rm -v har-lstm-96d:/app/outputs har-residual-lstm:latest python scripts/run_outline_complete.py
+```
+
+命令默认在前台显示日志。`--rm` 会在退出时移除容器，命名数据卷会保留结果。两套完整实验会写固定文件名；重复运行时可更换卷名，为每次运行单独留档。
+
+### 4. 查看和导出结果
+
+下表路径相对于容器的 `/app/outputs`，也是对应数据卷里的目录结构。
+
+| 运行方式 | 主要输出 |
+| --- | --- |
+| 短训练 | `cli/quick_*/` 下的 `metrics.csv`、`predictions.csv`、`split_summary.csv`、`metadata.json` |
+| 60 日窗口 | `artifacts/main_performance.csv`、`artifacts/test_predictions.csv`、`artifacts/split_summary.csv` |
+| 96 日窗口 | `artifacts_complete/all_model_summary.csv`、`artifacts_complete/ensemble_predictions.csv`、`artifacts_complete/split_summary.csv` |
+
+例如，将 60 日实验的数据卷复制到当前目录下的 `har-results-60d`。建议选择一个尚不存在的目标目录：
+
+```bash
+docker create --name har-lstm-export -v har-lstm-60d:/app/outputs har-residual-lstm:latest
+docker cp har-lstm-export:/app/outputs ./har-results-60d
+docker rm har-lstm-export
+```
+
+导出其他实验时，把 `har-lstm-60d` 和目标目录换成对应的名字。临时容器无需启动。
+
+在 Linux 上，若希望结果直接出现在宿主机目录，可用绑定挂载，并以当前用户的 UID 和 GID 运行以保证可写：
+
+```bash
+mkdir -p outputs
+docker run --rm --user "$(id -u):$(id -g)" --mount "type=bind,source=$PWD/outputs,target=/app/outputs" har-residual-lstm:latest
+```
+
+### 5. 使用自己的 CSV
+
+准备包含 `prices.csv` 和 `returns.csv` 的宿主机目录，保留与仓库示例相同的列和日期格式。将下例的 `/absolute/path/to/input` 换成实际绝对路径（Windows 示例为 `C:/data/har-input`）：
+
+```bash
+docker run --rm --mount "type=bind,source=/absolute/path/to/input,target=/app/data,readonly" -v har-lstm-custom:/app/outputs har-residual-lstm:latest python scripts/run_outline_complete.py
+```
+
+挂载会替换本次运行看到的 `/app/data`。镜像构建时的哈希校验覆盖仓库自带的 CSV，外部挂载的数据需要自行核对。
+
+### 常见问题
+
+| 现象 | 处理方法 |
+| --- | --- |
+| `docker version` 只有 Client，或提示无法连接守护进程 | 启动 Docker Desktop 或 Docker Engine 后重试。 |
+| 找不到 `Dockerfile` | 确认当前目录是仓库根目录，且已切到包含 Docker 配置的版本。 |
+| 拉取镜像时提示 `manifest unknown` 或 `denied` | 在 GitHub Actions 确认对应标签已发布，并检查 GHCR 登录状态与软件包权限；也可从源码构建。 |
+| 训练结束后容器从 `docker ps` 消失 | 批处理完成后容器退出，`--rm` 会移除它。请从命名数据卷导出结果。 |
+| 写入 `/app/outputs` 时提示权限不足 | 使用示例的命名数据卷；在 Linux 上绑定宿主目录时，先创建该目录，并使用上面的 `--user` 参数。 |
 
 ## 环境
 
