@@ -1,0 +1,10 @@
+**
+!requirements.txt
+!MANIFEST.sha256
+!scripts/
+!scripts/*.py
+!tests/
+!tests/*.py
+!data/
+!data/prices.csv
+!data/returns.csv

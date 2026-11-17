@@ -17,6 +17,10 @@
 | `requirements.txt` | 原实验环境的依赖版本 |
 | `MANIFEST.sha256` | 输入数据的 SHA-256 校验值 |
 
+## Docker 部署
+
+使用 CPU 镜像运行两套实验，或在 GitHub Actions 构建通过后从 GHCR 拉取镜像。参见 [Docker 运行指南](DOCKER.md)。
+
 ## 环境
 
 原实验环境为 Python 3.11.14、PyTorch 2.13.0+cpu；完整依赖版本保留在 `requirements.txt`。其中 Matplotlib 和 Seaborn 保留为历史环境记录，当前代码不再绘图。
